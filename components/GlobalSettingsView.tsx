@@ -80,18 +80,33 @@ export function GlobalSettingsView() {
 
   const toggleSkill = async (skillId: string, enabled: boolean) => {
     setBusy(skillId);
+    // 乐观更新：立刻改本地 skills + 顶部 status.skillsEnabled
+    // 避免 Turso eventual consistency 导致用户看到「点了没反应」
+    setSkills((prev) =>
+      prev.map((s) => (s.id === skillId ? { ...s, enabled } : s))
+    );
+    setStatus((prev) =>
+      prev
+        ? {
+            ...prev,
+            skillsEnabled: { ...prev.skillsEnabled, [skillId]: enabled },
+          }
+        : prev
+    );
     try {
       await fetch("/api/skills/toggle", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ skillId, enabled }),
       });
-      setSkills((prev) =>
-        prev.map((s) => (s.id === skillId ? { ...s, enabled } : s))
-      );
       showToast("ok", `${skillId} 已${enabled ? "启用" : "禁用"}`);
+      // 不立即 refresh status（Turso 写后读有 ~3-5s 滞后），依赖乐观更新即可
     } catch (e) {
       showToast("err", String(e));
+      // 失败回滚
+      setSkills((prev) =>
+        prev.map((s) => (s.id === skillId ? { ...s, enabled: !enabled } : s))
+      );
     } finally {
       setBusy(null);
     }
@@ -110,20 +125,29 @@ export function GlobalSettingsView() {
       return;
     }
     setBusy("add-kw");
+    // 乐观更新：立刻在本地 settings 加上 v（用户立刻看到 chip 出现）
+    const newKws = [...settings.auto_keywords, v];
+    setSettings({ ...settings, auto_keywords: newKws });
+    setKwInput("");
     try {
       const r = await fetch("/api/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ auto_keywords: [...settings.auto_keywords, v] }),
+        body: JSON.stringify({ auto_keywords: newKws }),
       });
       const j = await r.json();
       if (!j.ok) {
+        // 失败回滚
+        setSettings({ ...settings, auto_keywords: settings.auto_keywords });
+        setKwInput(v);
         showToast("err", j.error ?? "保存失败");
         return;
       }
-      setKwInput("");
-      await refresh();
       showToast("ok", `已添加「${v}」`);
+    } catch (e) {
+      setSettings({ ...settings, auto_keywords: settings.auto_keywords });
+      setKwInput(v);
+      showToast("err", String(e));
     } finally {
       setBusy(null);
     }
@@ -132,15 +156,26 @@ export function GlobalSettingsView() {
   const removeKeyword = async (k: string) => {
     if (!settings) return;
     setBusy(`rm-kw:${k}`);
+    // 乐观更新：立刻从本地 settings 移除 k（用户立刻看到 chip 消失）
+    const newKws = settings.auto_keywords.filter((x) => x !== k);
+    setSettings({ ...settings, auto_keywords: newKws });
     try {
-      await fetch("/api/settings", {
+      const r = await fetch("/api/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          auto_keywords: settings.auto_keywords.filter((x) => x !== k),
-        }),
+        body: JSON.stringify({ auto_keywords: newKws }),
       });
-      await refresh();
+      const j = await r.json();
+      if (!j.ok) {
+        // 失败回滚
+        setSettings({ ...settings, auto_keywords: settings.auto_keywords });
+        showToast("err", j.error ?? "删除失败");
+        return;
+      }
+      showToast("ok", `已删除「${k}」`);
+    } catch (e) {
+      setSettings({ ...settings, auto_keywords: settings.auto_keywords });
+      showToast("err", String(e));
     } finally {
       setBusy(null);
     }
