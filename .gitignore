@@ -1,0 +1,15 @@
+node_modules/
+.next/
+out/
+.env.local
+*.log
+.DS_Store
+next-env.d.ts
+
+# Local skill copies (downloaded from redfox-community for reference only)
+.agents/skills-redfox/
+
+# SQLite database and runtime data
+data/
+*.db
+*.db-journal
