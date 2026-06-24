@@ -70,7 +70,10 @@ export function GlobalSettingsView() {
   }, []);
 
   useEffect(() => {
-    refresh();
+    // Turso 写后立刻读会拿到副本 stale 数据；进入页面时延迟 1.5s 再拉，
+    // 让最近一次写入有足够时间同步到读副本（避免用户切到别页再回来看到状态回滚）
+    const t = setTimeout(refresh, 1500);
+    return () => clearTimeout(t);
   }, [refresh]);
 
   const showToast = (kind: "ok" | "err", msg: string) => {

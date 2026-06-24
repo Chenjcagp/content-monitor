@@ -35,11 +35,16 @@ export function Sidebar() {
   }, []);
 
   useEffect(() => {
-    refresh();
+    // 首次进入延迟 1.5s 拉取（避免 Turso 写后副本 stale 窗口）
+    const t = setTimeout(refresh, 1500);
     // 监听自定义事件，其他地方删除/新增 category 后可触发 refresh
-    const onChange = () => refresh();
+    // 事件触发时也延迟 1.5s 拉取（最近 PATCH/POST 写入尚未同步到读副本）
+    const onChange = () => setTimeout(refresh, 1500);
     window.addEventListener("categories:changed", onChange);
-    return () => window.removeEventListener("categories:changed", onChange);
+    return () => {
+      clearTimeout(t);
+      window.removeEventListener("categories:changed", onChange);
+    };
   }, [refresh]);
 
   return (

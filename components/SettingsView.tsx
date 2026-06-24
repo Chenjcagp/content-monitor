@@ -67,7 +67,10 @@ export function SettingsView({ categoryId }: { categoryId: string }) {
   }, [categoryId, router]);
 
   useEffect(() => {
-    refresh();
+    // Turso 写后立刻读会拿到副本 stale 数据；进入页面时延迟 1.5s 再拉，
+    // 让最近一次写入有足够时间同步到读副本（避免用户切到别页再回来看到状态回滚）
+    const t = setTimeout(refresh, 1500);
+    return () => clearTimeout(t);
   }, [refresh]);
 
   const showToast = (kind: "ok" | "err", msg: string) => {
@@ -110,7 +113,7 @@ export function SettingsView({ categoryId }: { categoryId: string }) {
       if (j.ok) {
         showToast("ok", "已保存");
         window.dispatchEvent(new Event("categories:changed"));
-        await refresh();
+        // 不立即 refresh — Turso 写后读副本有 ~3-5s 滞后，会拉回 stale 数据覆盖乐观 state
       } else {
         showToast("err", j.error ?? "保存失败");
       }

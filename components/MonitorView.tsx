@@ -82,7 +82,10 @@ export function MonitorView() {
   }, []);
 
   useEffect(() => {
-    refresh();
+    // Turso 写后立刻读会拿到副本 stale 数据；进入页面时延迟 1.5s 再拉，
+    // 让最近一次写入有足够时间同步到读副本
+    const t = setTimeout(refresh, 1500);
+    return () => clearTimeout(t);
   }, [refresh]);
 
   const showToast = (kind: "ok" | "err", msg: string) => {
@@ -171,30 +174,60 @@ export function MonitorView() {
               snapshots={snapshots[a.id] ?? []}
               onDelete={async () => {
                 if (!confirm(`确认删除「${a.display_name ?? a.douyin_id}」？`)) return;
-                const r = await fetch(`/api/accounts/${a.id}`, { method: "DELETE" });
-                const j = await r.json();
-                if (j.ok) {
-                  showToast("ok", "已删除");
-                  refresh();
-                } else {
-                  showToast("err", j.error ?? "失败");
+                // 乐观更新：立刻从列表移除
+                setAccounts((prev) => prev.filter((x) => x.id !== a.id));
+                try {
+                  const r = await fetch(`/api/accounts/${a.id}`, { method: "DELETE" });
+                  const j = await r.json();
+                  if (!j.ok) {
+                    showToast("err", j.error ?? "失败");
+                    // 失败回滚
+                    setAccounts((prev) => [...prev, a].sort((x, y) => x.added_at_ms - y.added_at_ms));
+                  } else {
+                    showToast("ok", "已删除");
+                  }
+                } catch (e) {
+                  showToast("err", String(e));
+                  setAccounts((prev) => [...prev, a].sort((x, y) => x.added_at_ms - y.added_at_ms));
                 }
               }}
               onToggleAutoSync={async () => {
-                const r = await fetch(`/api/accounts/${a.id}`, {
-                  method: "PATCH",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ auto_sync: a.auto_sync === 1 ? 0 : 1 }),
-                });
-                if (r.ok) refresh();
+                const next = a.auto_sync === 1 ? 0 : 1;
+                // 乐观更新：立刻翻转本地 auto_sync
+                setAccounts((prev) => prev.map((x) => (x.id === a.id ? { ...x, auto_sync: next as 0 | 1 } : x)));
+                try {
+                  const r = await fetch(`/api/accounts/${a.id}`, {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ auto_sync: next }),
+                  });
+                  if (!r.ok) {
+                    showToast("err", "保存失败");
+                    setAccounts((prev) => prev.map((x) => (x.id === a.id ? { ...x, auto_sync: a.auto_sync } : x)));
+                  }
+                } catch (e) {
+                  showToast("err", String(e));
+                  setAccounts((prev) => prev.map((x) => (x.id === a.id ? { ...x, auto_sync: a.auto_sync } : x)));
+                }
               }}
               onToggleGrowth={async () => {
-                const r = await fetch(`/api/accounts/${a.id}`, {
-                  method: "PATCH",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ track_growth: a.track_growth === 1 ? 0 : 1 }),
-                });
-                if (r.ok) refresh();
+                const next = a.track_growth === 1 ? 0 : 1;
+                // 乐观更新：立刻翻转本地 track_growth
+                setAccounts((prev) => prev.map((x) => (x.id === a.id ? { ...x, track_growth: next as 0 | 1 } : x)));
+                try {
+                  const r = await fetch(`/api/accounts/${a.id}`, {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ track_growth: next }),
+                  });
+                  if (!r.ok) {
+                    showToast("err", "保存失败");
+                    setAccounts((prev) => prev.map((x) => (x.id === a.id ? { ...x, track_growth: a.track_growth } : x)));
+                  }
+                } catch (e) {
+                  showToast("err", String(e));
+                  setAccounts((prev) => prev.map((x) => (x.id === a.id ? { ...x, track_growth: a.track_growth } : x)));
+                }
               }}
             />
           ))}
@@ -206,8 +239,9 @@ export function MonitorView() {
           onClose={() => setShowAdd(false)}
           onAdded={() => {
             setShowAdd(false);
-            refresh();
             showToast("ok", "已添加，正在异步回填账号信息…");
+            // 延迟 3s 再 refresh（避开 Turso 写后副本 stale 窗口）
+            setTimeout(refresh, 3000);
           }}
           onError={(msg) => showToast("err", msg)}
         />
