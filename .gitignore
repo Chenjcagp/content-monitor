@@ -6,6 +6,9 @@ out/
 .DS_Store
 next-env.d.ts
 
+# TypeScript incremental build cache
+*.tsbuildinfo
+
 # Local skill copies (downloaded from redfox-community for reference only)
 .agents/skills-redfox/
 
