@@ -184,7 +184,7 @@ export function GlobalSettingsView() {
   const saveFollowerFilter = async () => {
     setBusy("save-ff");
     try {
-      await fetch("/api/settings", {
+      const r = await fetch("/api/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -192,8 +192,13 @@ export function GlobalSettingsView() {
           follower_filter_max: ffMax,
         }),
       });
-      await refresh();
+      const j = await r.json();
+      if (!j.ok) {
+        showToast("err", j.error ?? "保存失败");
+        return;
+      }
       showToast("ok", "粉丝过滤规则已保存");
+      // 不调 refresh — Turso eventual consistency 会拿到 stale 数据，且 follower_filter 没在 UI 中显示读取
     } finally {
       setBusy(null);
     }
@@ -214,6 +219,9 @@ export function GlobalSettingsView() {
           ? `完成：状态=${j.status} 新增=${j.totalInserted}`
           : `回填完成：${j.days} 天，新增 ${j.totalInserted} 条`;
       showToast("ok", msg);
+      // cron 跑完后 status (runs, totalContents, bySource) 必须刷新；
+      // 延迟 3s 等 Turso 写同步到读副本，避免拉回 stale 数据覆盖本地乐观 state
+      await new Promise((res) => setTimeout(res, 3000));
       await refresh();
     } finally {
       setBusy(null);
