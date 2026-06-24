@@ -25,46 +25,61 @@ dev 本地开发仍然走 `data/app.db` 文件 SQLite（无网络延迟、调试
 
 ## 1. 注册 Turso 账号 + 建库
 
-### 1.1 安装 Turso CLI
+### 1.1 安装 Turso CLI（macOS / Linux）
 
 macOS：
 ```bash
 brew install tursodatabase/tap/turso
 ```
 
-Windows（PowerShell）：
-```powershell
-irm https://get.turso.tech/install.ps1 | iex
+Linux：
+```bash
+curl -sSfL https://get.tur.so/install.sh | bash
 ```
 
-### 1.2 登录 + 建库
+### 1.2 Windows 用户 — 用 Turso 网页 dashboard（推荐）
+
+**Turso CLI 在 Windows 上没有原生二进制**（只在 macOS / Linux 发行；Windows 用户需要 WSL 才能用 CLI）。最简单的方式是走 Turso dashboard 网页 UI：
+
+1. 浏览器打开 https://app.turso.tech/，点 **Sign in with GitHub**（用你打算部署代码的那个 GitHub 账号）
+2. 登录后，点 **Create database**：
+   - **Name**: `content-monitor`
+   - **Region**: 选 `Singapore (sin1)`（亚洲最近，国内访问最快）
+   - 点 **Create**
+3. 创建成功后跳转到数据库详情页。**记下顶部的 Database URL**，格式：
+   ```
+   libsql://content-monitor-<your-github-username>.turso.io
+   ```
+4. 左侧导航 → **Generate Token**：
+   - 选数据库名 `content-monitor`
+   - **Generate**
+   - **立即复制 token**（格式 `eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9...`，页面只显示这一次）
+5. 把这两样东西记下来：
+   - `DATABASE_URL = libsql://content-monitor-<username>.turso.io`
+   - `DATABASE_AUTH_TOKEN = eyJhbGci...`
+
+### 1.3 如果你已经有 WSL — 用 CLI 也可以
 
 ```bash
-turso auth login                        # 浏览器登录
-turso db create content-monitor        # 建库
-turso db show content-monitor          # 拿到 URL，类似：
-# URL : libsql://content-monitor-<your-name>.turso.io
+# 在 WSL 里
+curl -sSfL https://get.tur.so/install.sh | bash
+turso auth login                # 浏览器 OAuth
+turso db create content-monitor --region sin1
+turso db show content-monitor  # 拿到 URL
+turso db tokens create content-monitor  # 拿到 token
 ```
-
-### 1.3 拿到 auth token
-
-```bash
-turso db tokens create content-monitor
-# 输出：eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9....（长字符串）
-```
-
-记下两样东西：
-- `DATABASE_URL = libsql://content-monitor-<your-name>.turso.io`
-- `DATABASE_AUTH_TOKEN = eyJhbGci...`
 
 ### 1.4 （可选）手动连 Turso 看一眼
 
+CLI 方式：
 ```bash
 turso db shell content-monitor
 > .tables
 > SELECT COUNT(*) FROM settings;
 > .quit
 ```
+
+Dashboard 方式：左侧 **Playground** → 输入 SQL → Run。
 
 ---
 
@@ -187,24 +202,43 @@ env $(grep -v '^#' .env.local.turso | xargs) npm run dev
 
 ## 5. 数据迁移（首次部署时把本地数据搬过去）
 
-**简单办法**（推荐）：在 Turso 上让系统重新跑一次：
+**推荐：用我们写的迁移脚本**（一行命令搬全部 5 张表，含幂等 `INSERT OR IGNORE`，可重跑）：
+
 ```bash
-# 部署到 Vercel 后，curl 触发
-curl -X POST "https://<your-app>.vercel.app/api/cron/run" \
-  -H "Authorization: Bearer <CRON_SECRET>"
-# 只跑今天 1 天，再跑 backfill 回填历史 30 天
-curl -X POST "https://<your-app>.vercel.app/api/cron/backfill?days=30" \
-  -H "Authorization: Bearer <CRON_SECRET>"
+DATABASE_URL="libsql://content-monitor-<username>.turso.io" \
+DATABASE_AUTH_TOKEN="eyJhbGci..." \
+npx tsx scripts/migrate-to-turso.ts
 ```
 
-**完整迁移**（含历史 30 天）：用 `turso db shell` 导入本地 dump：
-```bash
-# 本地导出
-sqlite3 data/app.db .dump > data/app.sql
-
-# 远程导入（Turso CLI 1.0+ 支持）
-turso db shell content-monitor < data/app.sql
+输出形如：
 ```
+[1/3] 远端执行 schema...
+      ✓ schema 完成
+[2/3] 迁移数据...
+      settings                         7 rows
+      monitor_categories               2 rows
+      tracked_accounts                 0 rows
+      tracked_account_snapshots        0 rows
+      contents                         184 rows
+      sync_log                         1 rows
+[3/3] 验证...
+
+✓ Turso contents 表: 184 条 (本地 184 条)
+```
+
+脚本会自动：
+1. 在 Turso 远端跑 `db-schema.sql`（幂等 CREATE IF NOT EXISTS）
+2. ALTER TABLE 补 `monitor_categories.enabled` 列（如果缺）
+3. 用 `client.batch()` 分批 INSERT 全部 5 张表
+4. 对比本地 / Turso 行数，不一致报错
+
+**如果脚本失败**（比如网络中断），直接重跑——所有 INSERT 都是 `INSERT OR IGNORE`，重复跑安全。
+
+---
+
+**如果走 dashboard 而无 Turso CLI**：脚本不需要 CLI，纯走 libsql 协议；上面一行命令足够。
+
+**如果不想迁移**：直接跳到第 6 节部署，部署后第一次 cron 会自动采集新内容（dashboard 上线后会是空白，等 09:00 自动跑后才有数据）。
 
 ---
 
