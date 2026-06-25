@@ -70,9 +70,8 @@ export function GlobalSettingsView() {
   }, []);
 
   useEffect(() => {
-    // Turso 写后立刻读会拿到副本 stale 数据；进入页面时延迟 1.5s 再拉，
-    // 让最近一次写入有足够时间同步到读副本（避免用户切到别页再回来看到状态回滚）
-    const t = setTimeout(refresh, 1500);
+    // 延迟 800ms 让上次写入有时间同步到读副本
+    const t = setTimeout(refresh, 800);
     return () => clearTimeout(t);
   }, [refresh]);
 
@@ -84,7 +83,6 @@ export function GlobalSettingsView() {
   const toggleSkill = async (skillId: string, enabled: boolean) => {
     setBusy(skillId);
     // 乐观更新：立刻改本地 skills + 顶部 status.skillsEnabled
-    // 避免 Turso eventual consistency 导致用户看到「点了没反应」
     setSkills((prev) =>
       prev.map((s) => (s.id === skillId ? { ...s, enabled } : s))
     );
@@ -97,16 +95,36 @@ export function GlobalSettingsView() {
         : prev
     );
     try {
-      await fetch("/api/skills/toggle", {
+      const r = await fetch("/api/skills/toggle", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ skillId, enabled }),
       });
-      showToast("ok", `${skillId} 已${enabled ? "启用" : "禁用"}`);
-      // 不立即 refresh status（Turso 写后读有 ~3-5s 滞后），依赖乐观更新即可
+      const j = await r.json();
+      if (!j.ok) {
+        showToast("err", j.error ?? "保存失败");
+        setSkills((prev) =>
+          prev.map((s) => (s.id === skillId ? { ...s, enabled: !enabled } : s))
+        );
+        return;
+      }
+      // 用 API 返回的 truth value 校正本地状态（API 在写后同连接读回，正确）
+      if (typeof j.enabled === "boolean") {
+        setSkills((prev) =>
+          prev.map((s) => (s.id === skillId ? { ...s, enabled: j.enabled } : s))
+        );
+        setStatus((prev) =>
+          prev
+            ? {
+                ...prev,
+                skillsEnabled: { ...prev.skillsEnabled, [skillId]: j.enabled },
+              }
+            : prev
+        );
+        showToast("ok", `${skillId} 已${j.enabled ? "启用" : "禁用"}`);
+      }
     } catch (e) {
       showToast("err", String(e));
-      // 失败回滚
       setSkills((prev) =>
         prev.map((s) => (s.id === skillId ? { ...s, enabled: !enabled } : s))
       );

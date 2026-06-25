@@ -46,13 +46,12 @@ export async function get<T = unknown>(
 
 export async function set(key: string, value: unknown): Promise<void> {
   const db = await getDb();
-  const r = await db
+  await db
     .prepare(
       "INSERT INTO settings (key, value, updated_at_ms) VALUES (?, ?, ?) " +
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at_ms = excluded.updated_at_ms"
     )
     .run(key, JSON.stringify(value), Date.now());
-  console.log(`[set] ${key}=${JSON.stringify(value)} changes=${r.changes}`);
 }
 
 // 业务封装
@@ -77,9 +76,17 @@ export async function getSkillsEnabled(): Promise<SkillsEnabled> {
 }
 
 export async function setSkillEnabled(skillId: string, enabled: boolean): Promise<void> {
-  const cur = await getSkillsEnabled();
-  cur[skillId] = enabled;
-  await set("skills_enabled", cur);
+  // 关键修复：不要 read-modify-write（read 拿到 stale 副本会覆盖前面 PATCH 的写入）
+  // 改成循环 read → 写 → 验证，直到 read 看到我们刚写的值
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const cur = await getSkillsEnabled();
+    cur[skillId] = enabled;
+    await set("skills_enabled", cur);
+    const verify = await getSkillsEnabled();
+    if (verify[skillId] === enabled) return;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new Error(`setSkillEnabled(${skillId}=${enabled}) failed after 5 retries`);
 }
 
 export async function getFollowerFilter(): Promise<{
