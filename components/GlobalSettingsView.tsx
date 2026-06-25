@@ -17,6 +17,14 @@ import {
 } from "lucide-react";
 import { SkillToggleRow } from "./SkillToggleRow";
 import type { SkillDef } from "@/lib/skills/types";
+import {
+  getCachedSkillsEnabled,
+  setCachedSkillsEnabled,
+  getCachedAutoKeywords,
+  setCachedAutoKeywords,
+  getCachedFollowerFilter,
+  setCachedFollowerFilter,
+} from "@/lib/client-cache";
 
 interface SkillWithState extends SkillDef {
   enabled: boolean;
@@ -44,12 +52,22 @@ interface StatusResp {
 }
 
 export function GlobalSettingsView() {
-  const [skills, setSkills] = useState<SkillWithState[]>([]);
-  const [settings, setSettings] = useState<SettingsResp | null>(null);
+  // 初始 state 优先从 module cache 取（避免 Turso 副本 stale 覆盖用户刚刚改的值）
+  const cachedSkills = typeof window !== "undefined" ? getCachedSkillsEnabled() : null;
+  const cachedFf = typeof window !== "undefined" ? getCachedFollowerFilter() : null;
+  const cachedKw = typeof window !== "undefined" ? getCachedAutoKeywords() : null;
+  const [skills, setSkills] = useState<SkillWithState[]>(
+    cachedSkills ? (Object.entries(cachedSkills).map(([id, enabled]) => ({ id, enabled } as unknown as SkillWithState))) : []
+  );
+  const [settings, setSettings] = useState<SettingsResp | null>(
+    cachedKw && cachedFf
+      ? { auto_keywords: cachedKw, follower_filter: cachedFf, keyword_cap: 50 }
+      : null
+  );
   const [status, setStatus] = useState<StatusResp | null>(null);
   const [kwInput, setKwInput] = useState("");
-  const [ffMax, setFfMax] = useState(200000);
-  const [ffEnabled, setFfEnabled] = useState(true);
+  const [ffMax, setFfMax] = useState(cachedFf?.max ?? 200000);
+  const [ffEnabled, setFfEnabled] = useState(cachedFf?.enabled ?? true);
   const [busy, setBusy] = useState<string | null>(null);
   const [toast, setToast] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
 
@@ -57,23 +75,35 @@ export function GlobalSettingsView() {
     const [s, st] = await Promise.all([
       fetch("/api/skills/list").then((r) => r.json()),
       fetch("/api/settings").then((r) => r.json()),
-      fetch("/api/cron/status").then((r) => r.json()).catch(() => null),
     ]);
-    if (s.ok) setSkills(s.skills as SkillWithState[]);
+    if (s.ok) {
+      setSkills(s.skills as SkillWithState[]);
+      // 缓存 skills_enabled（key → enabled 映射）
+      const map: Record<string, boolean> = {};
+      (s.skills as SkillWithState[]).forEach((sk) => (map[sk.id] = sk.enabled));
+      setCachedSkillsEnabled(map);
+    }
     if (st.ok) {
       setSettings(st as SettingsResp);
       setFfEnabled(st.follower_filter.enabled);
       setFfMax(st.follower_filter.max);
+      setCachedAutoKeywords(st.auto_keywords);
+      setCachedFollowerFilter(st.follower_filter);
     }
     const statusRes = await fetch("/api/cron/status").then((r) => r.json());
     if (statusRes.ok) setStatus(statusRes as StatusResp);
   }, []);
 
   useEffect(() => {
-    // 延迟 800ms 让上次写入有时间同步到读副本
-    const t = setTimeout(refresh, 800);
-    return () => clearTimeout(t);
-  }, [refresh]);
+    // 仅在 cache 完全为空时才走 API；否则 background refresh 在 1.5s 后（避开 stale 窗口）
+    const needsInitialFetch = !cachedSkills || !cachedFf || !cachedKw;
+    if (needsInitialFetch) {
+      refresh();
+    } else {
+      const t = setTimeout(refresh, 1500);
+      return () => clearTimeout(t);
+    }
+  }, [refresh, cachedSkills, cachedFf, cachedKw]);
 
   const showToast = (kind: "ok" | "err", msg: string) => {
     setToast({ kind, msg });
@@ -94,6 +124,9 @@ export function GlobalSettingsView() {
           }
         : prev
     );
+    // 立刻更新客户端缓存：下次切换页面再回来，cache 还在
+    const cached = getCachedSkillsEnabled() ?? {};
+    setCachedSkillsEnabled({ ...cached, [skillId]: enabled });
     try {
       const r = await fetch("/api/skills/toggle", {
         method: "POST",
@@ -106,9 +139,10 @@ export function GlobalSettingsView() {
         setSkills((prev) =>
           prev.map((s) => (s.id === skillId ? { ...s, enabled: !enabled } : s))
         );
+        const revert = getCachedSkillsEnabled() ?? {};
+        setCachedSkillsEnabled({ ...revert, [skillId]: !enabled });
         return;
       }
-      // 用 API 返回的 truth value 校正本地状态（API 在写后同连接读回，正确）
       if (typeof j.enabled === "boolean") {
         setSkills((prev) =>
           prev.map((s) => (s.id === skillId ? { ...s, enabled: j.enabled } : s))
@@ -121,6 +155,8 @@ export function GlobalSettingsView() {
               }
             : prev
         );
+        const truth = getCachedSkillsEnabled() ?? {};
+        setCachedSkillsEnabled({ ...truth, [skillId]: j.enabled });
         showToast("ok", `${skillId} 已${j.enabled ? "启用" : "禁用"}`);
       }
     } catch (e) {
@@ -128,6 +164,8 @@ export function GlobalSettingsView() {
       setSkills((prev) =>
         prev.map((s) => (s.id === skillId ? { ...s, enabled: !enabled } : s))
       );
+      const revert = getCachedSkillsEnabled() ?? {};
+      setCachedSkillsEnabled({ ...revert, [skillId]: !enabled });
     } finally {
       setBusy(null);
     }
@@ -149,6 +187,7 @@ export function GlobalSettingsView() {
     // 乐观更新：立刻在本地 settings 加上 v（用户立刻看到 chip 出现）
     const newKws = [...settings.auto_keywords, v];
     setSettings({ ...settings, auto_keywords: newKws });
+    setCachedAutoKeywords(newKws);
     setKwInput("");
     try {
       const r = await fetch("/api/settings", {
@@ -158,8 +197,8 @@ export function GlobalSettingsView() {
       });
       const j = await r.json();
       if (!j.ok) {
-        // 失败回滚
         setSettings({ ...settings, auto_keywords: settings.auto_keywords });
+        setCachedAutoKeywords(settings.auto_keywords);
         setKwInput(v);
         showToast("err", j.error ?? "保存失败");
         return;
@@ -167,6 +206,7 @@ export function GlobalSettingsView() {
       showToast("ok", `已添加「${v}」`);
     } catch (e) {
       setSettings({ ...settings, auto_keywords: settings.auto_keywords });
+      setCachedAutoKeywords(settings.auto_keywords);
       setKwInput(v);
       showToast("err", String(e));
     } finally {
@@ -177,9 +217,9 @@ export function GlobalSettingsView() {
   const removeKeyword = async (k: string) => {
     if (!settings) return;
     setBusy(`rm-kw:${k}`);
-    // 乐观更新：立刻从本地 settings 移除 k（用户立刻看到 chip 消失）
     const newKws = settings.auto_keywords.filter((x) => x !== k);
     setSettings({ ...settings, auto_keywords: newKws });
+    setCachedAutoKeywords(newKws);
     try {
       const r = await fetch("/api/settings", {
         method: "PUT",
@@ -188,14 +228,15 @@ export function GlobalSettingsView() {
       });
       const j = await r.json();
       if (!j.ok) {
-        // 失败回滚
         setSettings({ ...settings, auto_keywords: settings.auto_keywords });
+        setCachedAutoKeywords(settings.auto_keywords);
         showToast("err", j.error ?? "删除失败");
         return;
       }
       showToast("ok", `已删除「${k}」`);
     } catch (e) {
       setSettings({ ...settings, auto_keywords: settings.auto_keywords });
+      setCachedAutoKeywords(settings.auto_keywords);
       showToast("err", String(e));
     } finally {
       setBusy(null);
@@ -204,6 +245,7 @@ export function GlobalSettingsView() {
 
   const saveFollowerFilter = async () => {
     setBusy("save-ff");
+    setCachedFollowerFilter({ enabled: ffEnabled, max: ffMax });
     try {
       const r = await fetch("/api/settings", {
         method: "PUT",
@@ -219,7 +261,6 @@ export function GlobalSettingsView() {
         return;
       }
       showToast("ok", "粉丝过滤规则已保存");
-      // 不调 refresh — Turso eventual consistency 会拿到 stale 数据，且 follower_filter 没在 UI 中显示读取
     } finally {
       setBusy(null);
     }
