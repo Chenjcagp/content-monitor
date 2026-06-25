@@ -113,7 +113,18 @@ export function SettingsView({ categoryId }: { categoryId: string }) {
       if (j.ok) {
         showToast("ok", "已保存");
         window.dispatchEvent(new Event("categories:changed"));
-        // 不立即 refresh — Turso 写后读副本有 ~3-5s 滞后，会拉回 stale 数据覆盖乐观 state
+        // 关键修复：触发 router.refresh() 让 server component（CategoryHeader）重新拉数据
+        // CategoryHeader 是 layout 里的 server component，客户端 PATCH 后它的数据不会自动更新
+        // router.refresh() 让 Next 重新执行 server component，刷新顶部标题和描述
+        //
+        // 注意：name 字段被乐观更新已经设置到 input 里，所以即使 router.refresh() 拿到
+        // Turso stale 数据（仍是旧 name），input 仍显示用户输入的 name。
+        // 顶部 CategoryHeader 显示的是 server-rendered 的旧数据，需要重新 fetch。
+        //
+        // 我们延迟 3s 再 refresh，等 Turso 写同步到读副本（避免拉回 stale 旧 name）
+        setTimeout(() => {
+          router.refresh();
+        }, 3000);
       } else {
         showToast("err", j.error ?? "保存失败");
       }

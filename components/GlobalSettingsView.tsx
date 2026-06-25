@@ -266,6 +266,16 @@ export function GlobalSettingsView() {
     }
   };
 
+  const refreshStatusOnly = useCallback(async () => {
+    // 只刷新 status（runs / totalContents / bySource / latestDate），
+    // 不动 skills_enabled / auto_keywords / follower_filter
+    // 避免把 Turso stale 副本的旧 skill 状态写回客户端 cache
+    const statusRes = await fetch("/api/cron/status").then((r) => r.json());
+    if (statusRes.ok) {
+      setStatus(statusRes as StatusResp);
+    }
+  }, []);
+
   const triggerSync = async (kind: "run" | "backfill") => {
     setBusy(kind);
     try {
@@ -284,7 +294,9 @@ export function GlobalSettingsView() {
       // cron 跑完后 status (runs, totalContents, bySource) 必须刷新；
       // 延迟 3s 等 Turso 写同步到读副本，避免拉回 stale 数据覆盖本地乐观 state
       await new Promise((res) => setTimeout(res, 3000));
-      await refresh();
+      // 关键修复：只刷 status，不刷 skills_enabled
+      // 否则 Turso 副本 stale 会把"刚刚 toggle off 的 skill"读为 on，覆盖客户端 cache
+      await refreshStatusOnly();
     } finally {
       setBusy(null);
     }
