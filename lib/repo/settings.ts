@@ -46,12 +46,13 @@ export async function get<T = unknown>(
 
 export async function set(key: string, value: unknown): Promise<void> {
   const db = await getDb();
-  await db
+  const r = await db
     .prepare(
       "INSERT INTO settings (key, value, updated_at_ms) VALUES (?, ?, ?) " +
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at_ms = excluded.updated_at_ms"
     )
     .run(key, JSON.stringify(value), Date.now());
+  console.log(`[set] ${key}=${JSON.stringify(value)} changes=${r.changes}`);
 }
 
 // 业务封装
